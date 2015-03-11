@@ -137,7 +137,8 @@ def main():
         else:
             for gene_id in gene_name_map[tf_symbol]:
                 if gene_id not in expression: 
-                    print >> sys.stderr, "EXP", tf_symbol, gene_id, gene_name_map[tf_symbol]
+                    print >> sys.stderr, ("EXP", tf_symbol, gene_id, 
+                                          gene_name_map[tf_symbol] )
                 else: 
                     print "%s\t%s\t%s\t%s" % (
                         "GENE_EXP", gene_id, tf_symbol, expression[gene_id])
