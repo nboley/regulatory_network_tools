@@ -1,0 +1,7 @@
+1) Fix the TF download code to not overwrite files
+1.1) Add the organism to the file
+1.2) Get the target genes directly from the DCC
+2) merge adjacent tfs of the same type
+3) merge overlapping tfs into enhancer regions
+4) actually build the graph
+5) integrate the do calculus
