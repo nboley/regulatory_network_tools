@@ -3,6 +3,8 @@ import os, sys, time
 
 import requests, json
 
+import urllib2
+
 from itertools import chain
 
 from collections import defaultdict
@@ -101,7 +103,7 @@ def find_called_peaks(experiment_id, only_merged=True):
     response = requests.get(URL, headers={'accept': 'application/json'})
     response_json_dict = response.json()
 
-    target = response_json_dict['target']['id']
+    target_id = response_json_dict['target']['@id']
     target_label = response_json_dict['target']['label']
 
     # build the replicate mapping
@@ -129,9 +131,9 @@ def find_called_peaks(experiment_id, only_merged=True):
             bsid = replicates[rep_key]['library']['biosample']['accession']
         file_loc = file_rec['href']
         if only_merged:
-            yield target, sample_type, file_type, file_loc
+            yield target_id, sample_type, file_type, file_loc
         else:
-            yield target, sample_type, rep_key, bsid, file_type, file_loc
+            yield target_id, sample_type, rep_key, bsid, file_type, file_loc
     return 
 
 
@@ -312,7 +314,7 @@ def find_rnaseq_experiments():
     return 
 
 def find_chipseq_experiments():
-    URL = "https://www.encodeproject.org/search/?type=experiment&assay_term_name=ChIP-seq&assembly=mm9&target.investigated_as=transcription%20factor&limit=all&format=json"
+    URL = "https://www.encodeproject.org/search/?type=experiment&assay_term_name=ChIP-seq&assembly=mm9&assembly=hg19&target.investigated_as=transcription%20factor&limit=all&format=json"
     response = requests.get(URL, headers={'accept': 'application/json'})
     response_json_dict = response.json()
     biosamples = set()
@@ -330,31 +332,44 @@ def find_rnaseq_fastqs_and_bams():
         print "bams"
         print find_bams(exp_id )
 
-def find_target_info(target):
-    URL = "https://www.encodeproject.org/experiments/{}/".format(experiment_id)
+def find_target_info(target_id):
+    URL = "https://www.encodeproject.org/{}?format=json".format(target_id)
     response = requests.get(URL, headers={'accept': 'application/json'})
     response_json_dict = response.json()
+    uniprot_ids = [x[10:] for x in response_json_dict['dbxref']
+                   if x.startswith("UniProtKB:")]
+    return response_json_dict['label'], response_json_dict['name'], uniprot_ids
 
-    pass
+def get_ensemble_genes_associated_with_uniprot_id(uniprot_id):
+    ens_id_pat = '<property type="gene ID" value="(ENS.*?)"/>'
+    res = urllib2.urlopen("http://www.uniprot.org/uniprot/%s.xml" % uniprot_id)
+    data = res.read()
+    gene_ids = set(re.findall(ens_id_pat, data))
+    return sorted(gene_ids)
+
 
 if __name__ == '__main__':
-    with open("mouse_tfs.txt", "w") as ofp:
+    with open("tfs.txt", "w") as ofp:
         chipseq_exps = list(find_chipseq_experiments())
         for i, exp_id in enumerate(chipseq_exps):
-            if i > 3: break
             for rep_i, res in enumerate(find_called_peaks(exp_id, True)):
                 target, sample_type, file_type, file_loc = res
+                tf_label, tf_name, uniprot_ids = find_target_info(target)
+                all_genes = [ get_ensemble_genes_associated_with_uniprot_id(uid)
+                              for uid in uniprot_ids ]
                 human_readable_ofname = (
-                    "_".join((target, sample_type.replace(" ", "-")))
+                    "_".join((tf_label, tf_name, sample_type.replace(" ", "-")))
                     + ".EXP-%s.%i.%s.bed" % (exp_id, rep_i, file_type ))
                 ofname = file_loc.split("/")[-1]
                 print "Downloading %i/%i" % (i+1, len(chipseq_exps))
-                cmd = "bigBedToBed {FNAME} {HR_FNAME}; rm {FNAME};".format( # wget --quiet {URL}; 
+                cmd = "wget --quiet {URL}; bigBedToBed {FNAME} {HR_FNAME}; rm {FNAME};".format(
                     URL=BASE_URL+file_loc, 
                     FNAME=ofname, HR_FNAME=human_readable_ofname )
                 os.system(cmd)
                 print >> ofp, "\t".join(
-                    (exp_id, target, sample_type, 
+                    (exp_id, tf_name, tf_label, ",".join(uniprot_ids), 
+                     ",".join(",".join(genes) for genes in all_genes), 
+                     sample_type, 
                      BASE_URL[:-2]+file_loc, 
                      human_readable_ofname))
 

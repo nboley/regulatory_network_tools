@@ -27,7 +27,7 @@ def calc_edit_distance(l, r):
     return sum(x != y for x, y in itertools.izip(l, r))
 
 # Align with mismatch, find first and move on, assumes only one
-def fuzz_align_old(left_seq, right_seq, adapter, mismatch):
+def fuzz_align_old(left_seq, right_seq, adapter, mismatch, min_match_length):
     """Find the optimal alignment of left_seq and right seq, 
     where the right portion of left seq is allowed to overlap
     the left portion of right seq. 
@@ -35,7 +35,7 @@ def fuzz_align_old(left_seq, right_seq, adapter, mismatch):
     """
     # loop through all allowable offsets
     rvs = []
-    for offset in xrange(1, max(1, len(left_seq) - MIN_MATCH_LENGTH)): 
+    for offset in xrange(1, max(1, len(left_seq) - min_match_length)): 
         l_primer = reverse_complement(left_seq[:offset])
         l_subset = left_seq[offset:offset+len(right_seq)]
         r_primer = right_seq[-offset:]
@@ -162,7 +162,7 @@ def main():
         if i%100000 == 0: print i
         
         align_1 = fuzz_align(
-            seq1, seq2, adapter, mismatch, MIN_MATCH_LENGTH) 
+            seq1, seq2, adapter, mismatch, min_match_length) 
         ## Debugging code
         #align_2 = fuzz_align_old(
         #    rc_seq1, seq2, adapter, mismatch) 

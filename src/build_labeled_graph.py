@@ -1,6 +1,8 @@
 import os, sys
 import re
 
+import numpy
+
 from collections import defaultdict
 
 import pysam
@@ -115,16 +117,36 @@ def load_gene_name_map():
         gene_name_map[gene_name].extend(genes)
     return dict(gene_name_map)
 
+def load_tads(mouse_fname="/srv/scratch/nboley/Het_Project/regulatory_network_tools/data/called_TADS/MouseES.HIC.combined.domain.bed", 
+              human_fname="/srv/scratch/nboley/Het_Project/regulatory_network_tools/data/called_TADS/IMR90.HIC.combined.domain.bed"):
+    tads = defaultdict(set)
+    with open(mouse_fname) as fp:
+        for line in fp:
+            contig, start, stop = line.split()
+            tads['mm9_'+contig].add(int(start))
+            tads['mm9_'+contig].add(int(stop))
+
+    with open(human_fname) as fp:
+        for line in fp:
+            contig, start, stop = line.split()
+            tads['hg19_'+contig].add(int(start))
+            tads['hg19_'+contig].add(int(stop))
+
+    for key, bndries in tads.items():
+        tads[key] = numpy.array(sorted(bndries))
+        
+    return dict(tads)
+
 def main():
-    gene_name_map = load_gene_name_map()
-    print >> sys.stderr, "Finished loading gene name map"
+    tads = load_tads()
+    print tads
+    return
     
     exp_header, expression = load_expression()
     print >> sys.stderr, "Finished loading expression"
 
     tf_positions = load_tf_sites("merged_TF_peaks.hg19_mm9.bed.gz")
     print >> sys.stderr, "Finished loading all TF peaks"
-    print len(tf_positions)
     
     encode_merged_tf_sites = load_encode_merged_tf_sites()
     print len(encode_merged_tf_sites)
