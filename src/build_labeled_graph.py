@@ -7,6 +7,13 @@ from collections import defaultdict
 
 import pysam
 
+from idr.idr import load_bed, merge_peaks
+
+import gzip, io
+
+
+DATA_BASE_DIR = os.path.abspath(os.path.dirname(__file__) + "/../data/")
+
 def load_GENCODE_names(fname):
     gene_name_map = defaultdict(list)
     with open(fname) as fp:
@@ -19,41 +26,6 @@ def load_GENCODE_names(fname):
             gene_name_map[gene_name.upper()].append(ensemble_id)
     return gene_name_map
 
-def load_hugo_names(fname="hgnc_complete_set.txt"):
-    header = None
-    gene_name_map = defaultdict(list)
-    with open(fname) as fp:
-        for i, line in enumerate(fp):
-            if i == 0: 
-                header = line.split("\t")
-                continue
-            data = line.split("\t")
-            gene_symbols = [data[1],] + [x.strip() for x in data[6].split(",")]
-            ensemble_id = data[36]
-            if ensemble_id == '': continue
-            assert ensemble_id.startswith("EN")
-            for symbol in gene_symbols:
-                #assert symbol not in gene_name_map
-                gene_name_map[symbol].append( ensemble_id )
-
-    return dict(gene_name_map)
-
-def load_encode_merged_tf_sites(fnames = ["chipseq_track_distal.bed", 
-                                          "chipseq_track_proximal.bed"]):
-    def extract_pos_and_tfs(line):
-        data = line.strip().split()
-        chrm, start, stop = data[0], int(data[1]), int(data[2])
-        return (chrm, start, stop), set(x.split("(")[0] for x in data[-1].split(","))
-    
-    tf_positions = defaultdict(list)
-    for fname in fnames:
-        with open(fname) as fp:
-            for i, line in enumerate(fp):
-                region, tfs = extract_pos_and_tfs(line)
-                for tf in tfs:
-                    tf_positions[tf].append(region)
-    return dict(tf_positions)
-
 def load_enhancers(tf_fnames):
     # we build enhancers from overlapping intervals of TF binding
     def extract_pos_and_tfs(line):
@@ -63,11 +35,16 @@ def load_enhancers(tf_fnames):
     
     tf_positions = defaultdict(list)
     for fname in fnames:
-        with open(fname) as fp:
-            for i, line in enumerate(fp):
-                region, tfs = extract_pos_and_tfs(line)
-                for tf in tfs:
-                    tf_positions[tf].append(region)
+        if fname.endswith("gz"): 
+            fp = io.TextIOWrapper(gzip.open(fname, 'rb'))
+        else: 
+            fp = open(fname)
+
+        for i, line in enumerate(fp):
+            region, tfs = extract_pos_and_tfs(line)
+            for tf in tfs:
+                tf_positions[tf].append(region)
+    
     return dict(tf_positions)
 
 def load_tf_sites(fname):
@@ -104,21 +81,24 @@ def load_expression(fname="all_quant.txt"):
 
 def load_gene_name_map():
     mm9_gene_name_map = load_GENCODE_names("gencode.vM4.annotation.gff3")
-    print >> sys.stderr, "Finished loading GENCODE mouse gene names"
+    print("Finished loading GENCODE mouse gene names", file=sys.stderr)
     
     hg19_gene_name_map = load_hugo_names()
-    print >> sys.stderr, "Finished loading hugo names"
+    print("Finished loading hugo names", file=sys.stderr)
     #tf_positions = load_encode_merged_tf_sites()
 
     gene_name_map = defaultdict(list)
-    for gene_name, genes in mm9_gene_name_map.iteritems():
+    for gene_name, genes in mm9_gene_name_map.items():
         gene_name_map[gene_name].extend(genes)
-    for gene_name, genes in hg19_gene_name_map.iteritems():
+    for gene_name, genes in hg19_gene_name_map.items():
         gene_name_map[gene_name].extend(genes)
     return dict(gene_name_map)
 
-def load_tads(mouse_fname="/srv/scratch/nboley/Het_Project/regulatory_network_tools/data/called_TADS/MouseES.HIC.combined.domain.bed", 
-              human_fname="/srv/scratch/nboley/Het_Project/regulatory_network_tools/data/called_TADS/IMR90.HIC.combined.domain.bed"):
+def load_tads(mouse_fname=os.path.join(
+        DATA_BASE_DIR, "./called_TADS/MouseES.HIC.combined.domain.bed"),
+              human_fname=os.path.join(
+        DATA_BASE_DIR, "./called_TADS/IMR90.HIC.combined.domain.bed")):
+              
     tads = defaultdict(set)
     with open(mouse_fname) as fp:
         for line in fp:
@@ -132,38 +112,51 @@ def load_tads(mouse_fname="/srv/scratch/nboley/Het_Project/regulatory_network_to
             tads['hg19_'+contig].add(int(start))
             tads['hg19_'+contig].add(int(stop))
 
-    for key, bndries in tads.items():
+    for key, bndries in list(tads.items()):
         tads[key] = numpy.array(sorted(bndries))
         
     return dict(tads)
 
-def main():
-    tads = load_tads()
-    print tads
+def main():    
+    all_peaks = []
+    for file_index, fname in enumerate(sys.argv[1:]):
+        #if file_index > 4: break
+        print( file_index, fname )
+        
+        pk_fp = io.TextIOWrapper(gzip.open(fname, 'rb'))
+        peaks = load_bed( pk_fp, signal_index=4 )
+        all_peaks.append(peaks)
+        pk_fp.close()
+
+    merged_peaks = merge_peaks(all_peaks, max, use_nonoverlapping_peaks=True )
+    print( merged_peaks[0] )
     return
+
+    tads = load_tads()
+    print(tads)
     
     exp_header, expression = load_expression()
-    print >> sys.stderr, "Finished loading expression"
+    print("Finished loading expression", file=sys.stderr)
 
     tf_positions = load_tf_sites("merged_TF_peaks.hg19_mm9.bed.gz")
-    print >> sys.stderr, "Finished loading all TF peaks"
+    print("Finished loading all TF peaks", file=sys.stderr)
     
     encode_merged_tf_sites = load_encode_merged_tf_sites()
-    print len(encode_merged_tf_sites)
+    print(len(encode_merged_tf_sites))
     assert False
     
-    print "type\tname\tgene_ens_id\t%s" % "\t".join(exp_header)
-    for tf_symbol, positions in tf_positions.items():
+    print("type\tname\tgene_ens_id\t%s" % "\t".join(exp_header))
+    for tf_symbol, positions in list(tf_positions.items()):
         if tf_symbol not in gene_name_map:
-            print >> sys.stderr, tf_symbol #, gene_name_map[tf]
+            print(tf_symbol, file=sys.stderr) #, gene_name_map[tf]
         else:
             for gene_id in gene_name_map[tf_symbol]:
                 if gene_id not in expression: 
-                    print >> sys.stderr, ("EXP", tf_symbol, gene_id, 
-                                          gene_name_map[tf_symbol] )
+                    print(("EXP", tf_symbol, gene_id, 
+                                          gene_name_map[tf_symbol] ), file=sys.stderr)
                 else: 
-                    print "%s\t%s\t%s\t%s" % (
-                        "GENE_EXP", gene_id, tf_symbol, expression[gene_id])
+                    print("%s\t%s\t%s\t%s" % (
+                        "GENE_EXP", gene_id, tf_symbol, expression[gene_id]))
 
 if __name__ == '__main__':
     main()
