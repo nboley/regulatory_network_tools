@@ -3,13 +3,15 @@ import os, sys, time
 
 import requests, json
 
-import urllib2
+import urllib3 as urllib
 
 from itertools import chain
 
 from collections import defaultdict, namedtuple
 
 import re
+
+import gzip, io
 
 from multiprocessing import Value
 
@@ -18,6 +20,23 @@ PeakFile = namedtuple('PeakFiles', [
     'file_type', 'output_type', 'file_loc'])
 
 BASE_URL = "https://www.encodeproject.org/"
+
+def group_overlapping_intervals(intervals):
+    intervals = sorted(intervals)
+    if len(intervals) == 0: return []
+    
+    curr_start, curr_stop = intervals[0][0], intervals[0][1]
+    merged_intervals = [([curr_start, curr_stop], [intervals[0],]),]
+    for interval in intervals[1:]:
+        if interval[0] > curr_stop:
+            curr_start, curr_stop = interval[0], interval[1]
+            merged_intervals.append(
+                ([curr_start, curr_stop], [interval,]) )
+        else:
+            curr_stop = max(curr_stop, interval[1])
+            merged_intervals[-1][1].append(interval)
+
+    return merged_intervals
 
 def get_TF_name_and_label_from_fname(fname):
     TF_label = os.path.basename(fname).split("_")[0]
@@ -58,27 +77,11 @@ def load_peaks_merged_by_TF(fnames):
         print( "Grouping %i/%i " % (i, len(tf_grpd_peaks)) )
         tf_merged_peaks[tf] = {}
         for contig, intervals in tf_peaks.items():
+            intervals.sort()
             tf_merged_peaks[tf][contig] = [
                 (x[0], tf) for x in group_overlapping_intervals(intervals) ]
 
     return tf_grpd_peaks
-
-def group_overlapping_intervals(intervals):
-    intervals = sorted(intervals)
-    if len(intervals) == 0: return []
-    
-    curr_start, curr_stop = intervals[0][0], intervals[0][1]
-    merged_intervals = [([curr_start, curr_stop], [intervals[0],]),]
-    for interval in intervals[1:]:
-        if interval[0] > curr_stop:
-            merged_intervals.append(
-                ([curr_start, curr_stop], [interval,]) )
-            curr_start, curr_stop = interval[0], interval[1]
-        else:
-            curr_stop = max(curr_stop, interval[1])
-            merged_intervals[-1][1].append(interval)
-
-    return merged_intervals
 
 def flatten_peaks(peaks):
     merged_peaks = defaultdict(list)
@@ -91,10 +94,11 @@ def flatten_peaks(peaks):
     return merged_peaks
 
 def load_and_merge_peaks(fnames):
-    TF_merged_peaks = load_peaks_merged_by_TF(sys.argv[1:])
+    TF_merged_peaks = load_peaks_merged_by_TF(fnames)
 
     all_peaks = defaultdict(list)
 
+    all_peaks = []
     ofnames = []
     for tf, tf_peaks in TF_merged_peaks.items():
         print( "Merging ", tf )
@@ -107,10 +111,19 @@ def load_and_merge_peaks(fnames):
             for contig, contig_peaks in sorted(tf_peaks.items()):
                 for (start, stop, tfs) in contig_peaks:
                     assert len(tfs) == 1 and tfs[0] == tf
+                    all_peaks.append((contig, start, stop, tf))
                     print("\t".join(str(x) for x in (
                         contig, start, stop, ",".join(tfs))),
                           file=ofp) 
+        os.system("bgzip {fname}; tabix -p bed {fname}.gz".format(fname=ofname))
         ofnames.append(ofname)
+    
+    all_peaks.sort()
+    ofname = "all_peaks.bed"
+    with open(ofname, "w") as ofp:
+        for peak in all_peaks:
+            print( "\t".join(map(str, peak)), file=ofp )
+    os.system("bgzip {fname}; tabix -p bed {fname}.gz".format(fname=ofname))
     
     ## merge all peaks
     #with open("mergedpeaks.bed".format(tf), "w") as ofp:
@@ -200,7 +213,7 @@ def find_peaks_and_group_by_target(
     chipseq_exps = list(find_chipseq_experiments())
     for i, exp_id in enumerate(chipseq_exps):
         #if i > 10: break
-        print i, len(chipseq_exps), exp_id 
+        print( i, len(chipseq_exps), exp_id )
         for rep_i, res in enumerate(find_called_peaks(exp_id, True)):
             targets[res.target_id].append(res)
             #print i, find_target_info(res.target_id)
@@ -221,7 +234,7 @@ def find_peaks_and_group_by_target(
                     or f.bsid == 'merged'
             )
         ]
-        print i, len(targets), target
+        print( i, len(targets), target )
         yield target, new_file_data
     return
 
@@ -259,7 +272,7 @@ def download_sort_and_index_tfs():
                 ).format(URL=BASE_URL+file_data.file_loc, 
                          FNAME=ofname, 
                          HR_FNAME=human_readable_ofname )
-                print cmd
+                print( cmd )
                 os.system(cmd)
                 res.append(
                     (file_data.exp_id, tf_name, tf_label, 
@@ -271,8 +284,9 @@ def download_sort_and_index_tfs():
                      human_readable_ofname))
 
 if __name__ == '__main__':
-    res = download_sort_and_index_tfs()
-    with open("tfs.txt", "w") as ofp:
-        for entry in res:
-            print( "\t".join(entry), file=ofp )
+    #res = download_sort_and_index_tfs()
+    #with open("tfs.txt", "w") as ofp:
+    #    for entry in res:
+    #        print( "\t".join(entry), file=ofp )
     #call_peaks_for_experiment( sys.argv[1] )
+    load_and_merge_peaks( sys.argv[1:] )
