@@ -3,7 +3,7 @@ import os, sys, time
 
 import requests, json
 
-import urllib3 as urllib
+import urllib3
 
 from itertools import chain
 
@@ -16,8 +16,19 @@ import gzip, io
 from multiprocessing import Value
 
 PeakFile = namedtuple('PeakFiles', [
-    'exp_id', 'target_id', 'sample_type', 'rep_key', 'bsid', 
-    'file_type', 'output_type', 'file_loc'])
+    'exp_id', 'target_id', 
+    'sample_type', 'rep_key', 'bsid', 
+    'assembly',
+    'file_format', 'file_format_type', 'output_type', 'file_loc'])
+
+TargetInfo = namedtuple('TargetInfo', [
+    'target_id', 
+    'organism',
+    'tf_name', 
+    'uniprot_ids',
+    'gene_name',
+    'ensemble_ids',
+    'cisbp_id'])
 
 BASE_URL = "https://www.encodeproject.org/"
 
@@ -148,23 +159,25 @@ def find_called_peaks(experiment_id, only_merged=True):
     # build the replicate mapping
     replicates = {}
     for rep_rec in response_json_dict['replicates']:
+        # skip replicates without an associated library...
+        if 'library' not in rep_rec:
+            continue
+        # skip treated libraries
+        if len(rep_rec['library']['treatments']) > 0:
+            continue
         key = (rep_rec['biological_replicate_number'], 
                rep_rec['technical_replicate_number'])
         replicates[key] = rep_rec
 
     sample_type = response_json_dict['biosample_term_name']
-    #sample = replicates.values()[0]['library']['biosample']['aliases']
-    #print replicates.values()[0]['library']['biosample']
-    #assert False
-
+    
     for file_rec in response_json_dict['files']:
-        file_type = file_rec['file_format']
-        output_type = file_rec['output_type']
-        #if file_type not in ['broadPeak', 'narrowPeak', 
-        #                     'bed_broadPeak', 'bed_narrowPeak']:
-        #    continue
-        if file_type not in ['bed_broadPeak', 'bed_narrowPeak']:
+        file_format = file_rec['file_format']
+        if file_format not in ['bed', ]:
             continue
+
+        file_format_type = file_rec['file_format_type']
+        output_type = file_rec['output_type']
         
         if 'replicate' not in file_rec: 
             rep_key = 'merged'
@@ -175,8 +188,11 @@ def find_called_peaks(experiment_id, only_merged=True):
                        file_rec['replicate']['technical_replicate_number'] )
             bsid = replicates[rep_key]['library']['biosample']['accession']
         file_loc = file_rec['href']
-        yield PeakFile(experiment_id, target_id, sample_type, rep_key, bsid, 
-                       file_type, output_type, file_loc)
+        assembly = file_rec['assembly']
+        yield PeakFile(experiment_id, target_id, 
+                       sample_type, rep_key, bsid,
+                       assembly,
+                       file_format, file_format_type, output_type, file_loc)
 
     return 
 
@@ -191,19 +207,40 @@ def find_chipseq_experiments(assemblies=['mm9', 'hg19']): # 'hg19',
         yield experiment['@id'].split("/")[-2]
     return 
 
+def find_cisbp_tfids(tf_name, uniprot_ids, ensemble_ids):
+    query = "SELECT * FROM tfs WHERE dbid IN %s;"
+    args = tuple(chain(uniprot_ids, chain(*ensemble_ids)))
+    print( query )
+    assert False
+    pass
+
 def find_target_info(target_id):
     URL = "https://www.encodeproject.org/{}?format=json".format(target_id)
     response = requests.get(URL, headers={'accept': 'application/json'})
     response_json_dict = response.json()
+    print( response_json_dict )
+    organism = response_json_dict['organism']['scientific_name']
+    tf_name = response_json_dict['name']
     uniprot_ids = [x[10:] for x in response_json_dict['dbxref']
                    if x.startswith("UniProtKB:")]
-    return response_json_dict['label'], response_json_dict['name'], uniprot_ids
+    gene_name = response_json_dict['gene_name']
+    ensemble_ids = [get_ensemble_genes_associated_with_uniprot_id(uniprot_id) 
+                    for uniprot_id in uniprot_ids]
+    cisbp_ids = find_cisbp_tfids(tf_name, uniprot_ids, ensemble_ids)
+    rv = TargetInfo(target_id, organism, 
+                    tf_name, uniprot_ids, 
+                    gene_name, ensemble_ids, 
+                    'XXX')
+    print( rv )
+    assert False
+    return 
 
+http = urllib3.PoolManager()
 def get_ensemble_genes_associated_with_uniprot_id(uniprot_id):
-    ens_id_pat = '<property type="gene ID" value="(ENS.*?)"/>'
-    res = urllib2.urlopen("http://www.uniprot.org/uniprot/%s.xml" % uniprot_id)
-    data = res.read()
-    gene_ids = set(re.findall(ens_id_pat, data))
+    ens_id_pat = b'<property type="gene ID" value="(ENS.*?)"/>'
+    res = http.request(
+        "GET", "http://www.uniprot.org/uniprot/%s.xml" % uniprot_id)
+    gene_ids = set(re.findall(ens_id_pat, res.data))
     return sorted(gene_ids)
 
 def find_peaks_and_group_by_target(
@@ -212,12 +249,13 @@ def find_peaks_and_group_by_target(
     targets = defaultdict(list)
     chipseq_exps = list(find_chipseq_experiments())
     for i, exp_id in enumerate(chipseq_exps):
-        #if i > 10: break
+        if i > 1: break
         print( i, len(chipseq_exps), exp_id )
-        for rep_i, res in enumerate(find_called_peaks(exp_id, True)):
+        for rep_i, res in enumerate(find_called_peaks(exp_id, only_merged)):
             targets[res.target_id].append(res)
-            #print i, find_target_info(res.target_id)
-
+            print( res.file_format, res.file_format_type, "-", res.output_type )
+        print()
+    
     # remove redudant experiments
     for i, (target, file_data) in enumerate(targets.items()):
         any_uniformly_processed = any(
@@ -251,10 +289,11 @@ def download_sort_and_index_tfs():
                 "_".join((tf_label, tf_name, 
                           file_data.output_type, 
                           file_data.sample_type.replace(" ", "-"))) \
-                + ".EXP-%s.%s.%s.%s.bgz" % (
+                + ".EXP-%s.%s.%s.%s.%s.bgz" % (
                     file_data.exp_id, 
                     file_data.rep_key, 
                     file_data.output_type,
+                    file_data.file_format,
                     file_data.file_type))
             human_readable_ofname = human_readable_ofname.replace(
                 "/", "#FWDSLASH#")
@@ -284,9 +323,17 @@ def download_sort_and_index_tfs():
                      human_readable_ofname))
 
 if __name__ == '__main__':
+    for target, files in find_peaks_and_group_by_target(
+            only_merged=False, prefer_uniformly_processed=False):
+        print(target)
+        target_info = find_target_info(target)
+        print( target_info )
+        for uniprot_id in target_info[-1]:
+            print( get_ensemble_genes_associated_with_uniprot_id(uniprot_id) )
+        print(files)
     #res = download_sort_and_index_tfs()
     #with open("tfs.txt", "w") as ofp:
     #    for entry in res:
     #        print( "\t".join(entry), file=ofp )
     #call_peaks_for_experiment( sys.argv[1] )
-    load_and_merge_peaks( sys.argv[1:] )
+    #load_and_merge_peaks( sys.argv[1:] )
