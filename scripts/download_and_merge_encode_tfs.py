@@ -4,6 +4,8 @@ import os, sys, time
 import requests, json
 
 import urllib3
+import psycopg2
+conn = psycopg2.connect("host=mitra dbname=cisbp")
 
 from itertools import chain
 
@@ -161,7 +163,7 @@ def find_called_peaks(experiment_id, only_merged=True):
     for rep_rec in response_json_dict['replicates']:
         # skip replicates without an associated library...
         if 'library' not in rep_rec:
-            continue
+            return
         # skip treated libraries
         if len(rep_rec['library']['treatments']) > 0:
             continue
@@ -187,7 +189,7 @@ def find_called_peaks(experiment_id, only_merged=True):
             rep_key = (file_rec['replicate']['biological_replicate_number'],
                        file_rec['replicate']['technical_replicate_number'] )
             bsid = replicates[rep_key]['library']['biosample']['accession']
-        file_loc = file_rec['href']
+        file_loc = "http://encodeproject.org" + file_rec['href']
         assembly = file_rec['assembly']
         yield PeakFile(experiment_id, target_id, 
                        sample_type, rep_key, bsid,
@@ -207,40 +209,64 @@ def find_chipseq_experiments(assemblies=['mm9', 'hg19']): # 'hg19',
         yield experiment['@id'].split("/")[-2]
     return 
 
-def find_cisbp_tfids(tf_name, uniprot_ids, ensemble_ids):
-    query = "SELECT * FROM tfs WHERE dbid IN %s;"
-    args = tuple(chain(uniprot_ids, chain(*ensemble_ids)))
-    print( query )
-    assert False
-    pass
+def find_cisbp_tfids(species, tf_name, uniprot_ids, ensemble_ids):
+    cur = conn.cursor()
+    query = "SELECT tf_id FROM tfs WHERE dbid IN %s;"
+    #print(cur.mogrify(
+    #    query, [tuple(chain(uniprot_ids, chain(*ensemble_ids))),]))
+    rv = []
+    prot_and_gene_ids = tuple(chain(uniprot_ids, chain(*ensemble_ids)))
+    if len(prot_and_gene_ids) > 0:
+        cur.execute(query, [prot_and_gene_ids,]) 
+        rv = [x[0] for x in cur.fetchall()]
+    # if we can't find a reference from the uniprot or ensemble ids,
+    # then try with the tf name
+    if len(rv) != 1:
+        query = "SELECT tf_id FROM tfs WHERE tf_species = %s and tf_name = %s;"
+        res = cur.execute(
+            query, (species, tf_name))
+        rv = [x[0] for x in cur.fetchall()]
+    
+    # if we still an't find a match, try with the upper case
+    if len(rv) != 1:
+        query = "SELECT tf_id FROM tfs WHERE tf_species = %s and upper(tf_name) = upper(%s);"
+        res = cur.execute(
+            query, (species.replace(" ", "_"), tf_name))
+        rv = [x[0] for x in cur.fetchall()]
+        
+    return rv
 
 def find_target_info(target_id):
     URL = "https://www.encodeproject.org/{}?format=json".format(target_id)
     response = requests.get(URL, headers={'accept': 'application/json'})
     response_json_dict = response.json()
-    print( response_json_dict )
-    organism = response_json_dict['organism']['scientific_name']
-    tf_name = response_json_dict['name']
+    organism = response_json_dict['organism']['scientific_name'].replace(" ", "_")
+    tf_name = response_json_dict['label']
     uniprot_ids = [x[10:] for x in response_json_dict['dbxref']
                    if x.startswith("UniProtKB:")]
     gene_name = response_json_dict['gene_name']
-    ensemble_ids = [get_ensemble_genes_associated_with_uniprot_id(uniprot_id) 
-                    for uniprot_id in uniprot_ids]
-    cisbp_ids = find_cisbp_tfids(tf_name, uniprot_ids, ensemble_ids)
+    ensemble_ids = sorted(
+        get_ensemble_genes_associated_with_uniprot_id(uniprot_id) 
+        for uniprot_id in uniprot_ids)
+    cisbp_ids = find_cisbp_tfids(organism, tf_name, uniprot_ids, ensemble_ids)
+    if len(cisbp_ids) == 0:
+        cisbp_id = None
+    else:
+        assert len(cisbp_ids) == 1
+        cisbp_id = cisbp_ids[0]
     rv = TargetInfo(target_id, organism, 
                     tf_name, uniprot_ids, 
                     gene_name, ensemble_ids, 
-                    'XXX')
-    print( rv )
-    assert False
-    return 
+                    cisbp_id)
+    return rv
 
 http = urllib3.PoolManager()
 def get_ensemble_genes_associated_with_uniprot_id(uniprot_id):
-    ens_id_pat = b'<property type="gene ID" value="(ENS.*?)"/>'
+    ens_id_pat = '<property type="gene ID" value="(ENS.*?)"/>'
     res = http.request(
         "GET", "http://www.uniprot.org/uniprot/%s.xml" % uniprot_id)
-    gene_ids = set(re.findall(ens_id_pat, res.data))
+    #print( res.read().decode('utf-8') )
+    gene_ids = set(re.findall(ens_id_pat, res.read().decode('utf-8')))
     return sorted(gene_ids)
 
 def find_peaks_and_group_by_target(
@@ -322,15 +348,131 @@ def download_sort_and_index_tfs():
                      BASE_URL[:-1]+file_data.file_loc, 
                      human_readable_ofname))
 
+def find_or_insert_experiment_from_called_peaks(called_peaks):
+    cur = conn.cursor()
+
+    # first check to see if the experiment is already in the DB. If
+    # so, we are done
+    encode_exp_ids = set(
+        called_peak.exp_id for called_peak in called_peaks)
+    assert len(encode_exp_ids) == 1, str(encode_exp_ids)
+    encode_exp_id = encode_exp_ids.pop()
+    query = "SELECT encode_experiment_id FROM encode_chipseq_experiments WHERE encode_experiment_id = %s;"
+    cur.execute(query, [encode_exp_id,])
+    # if the experiment is already there, we are done
+    if len(cur.fetchall()) == 1:
+        return
+    # otherwise, insert everything
+    encode_target_ids = set(
+        called_peak.target_id for called_peak in called_peaks)
+    assert len(encode_target_ids) == 1
+    encode_target_id = encode_target_ids.pop()
+    # find our associated target id 
+    query = "SELECT chipseq_target_id FROM chipseq_targets WHERE encode_target_id = %s"
+    cur.execute(query, [encode_target_id,])
+    res = cur.fetchall()
+    # if we can't find a matching tf id, insert it
+    if len(res) == 0:
+        target_info = find_target_info(encode_target_id)
+        query = "INSERT INTO chipseq_targets (encode_target_id, tf_id, organism, tf_name, uniprot_ids, ensemble_gene_ids) VALUES (%s, %s, %s, %s, %s, %s) RETURNING chipseq_target_id"
+        cur.execute(query, [encode_target_id, 
+                            target_info.cisbp_id, 
+                            target_info.organism,
+                            target_info.tf_name,
+                            target_info.uniprot_ids, 
+                            target_info.ensemble_ids])
+        res = cur.fetchall()
+    assert len(res) == 1
+    target_id = res[0][0]
+
+    sample_types = set(
+        called_peak.sample_type for called_peak in called_peaks)
+    assert len(sample_types) == 1
+    sample_type = sample_types.pop()
+    # add the experiment data
+    query = "INSERT INTO encode_chipseq_experiments " \
+          + "(encode_experiment_id, target, sample_type) " \
+          + "VALUES (%s, %s, %s)"
+    cur.execute(query, [
+        encode_exp_id, target_id, sample_type])
+    return
+
+def encode_exp_is_in_db(exp_id):
+    cur = conn.cursor()
+    query = "SELECT encode_experiment_id FROM encode_chipseq_experiments WHERE encode_experiment_id = %s;"
+    cur.execute(query, [exp_id,])
+    # if the experiment is already there, we are done
+    if len(cur.fetchall()) == 1:
+        return True
+    return False
+
+def insert_chipseq_experiment_into_db(exp_id):
+    """
+    CREATE TABLE chipseq_targets (
+        id SERIAL PRIMARY KEY,
+        encode_id text UNIQUE,
+        tf_id text NOT NULL,
+        organism text NOT NULL,
+        tf_name text NOT NULL,
+        uniprot_ids text[] NOT NULL,
+        ensemble_gene_ids text[][] NOT NULL
+    );
+
+    CREATE TABLE encode_chipseq_experiments (
+        id text PRIMARY KEY,
+        target int NOT NULL REFERENCES chipseq_targets(id),
+        sample_type text NOT NULL
+    );
+
+    CREATE TABLE encode_chipseq_peak_files (
+        experiment_id text NOT NULL REFERENCES encode_chipseq_experiments(id),
+        bsid text NOT NULL,
+        rep_key text NOT NULL,
+        file_format text NOT NULL,
+        file_format_type text NOT NULL,
+        file_output_type text NOT NULL,
+        remote_filename text NOT NULL,
+        local_filename text NOT NULL
+    );
+    """
+    if encode_exp_is_in_db(exp_id):
+        return
+    
+    called_peaks = list(find_called_peaks(exp_id, only_merged=False))
+    if len(called_peaks) == 0: return
+    
+    # insert the experiment and target into the DB if necessary
+    num_inserted = find_or_insert_experiment_from_called_peaks(called_peaks)
+    cur = conn.cursor()
+    for called_peak in called_peaks:
+        # add the peak data
+        query = "INSERT INTO encode_chipseq_peak_files " \
+              + "(encode_experiment_id, bsid, rep_key, file_format, file_format_type, file_output_type, remote_filename) " \
+              + "VALUES (%s, %s, %s, %s, %s, %s, %s)"
+        try: 
+            cur.execute(query, [
+                called_peak.exp_id, called_peak.bsid, called_peak.rep_key,
+                called_peak.file_format, called_peak.file_format_type, called_peak.output_type,
+                called_peak.file_loc])
+        except psycopg2.IntegrityError:
+            print( "ERROR" )
+            raise
+            pass
+    conn.commit()
+    return
+
 if __name__ == '__main__':
-    for target, files in find_peaks_and_group_by_target(
-            only_merged=False, prefer_uniformly_processed=False):
-        print(target)
-        target_info = find_target_info(target)
-        print( target_info )
-        for uniprot_id in target_info[-1]:
-            print( get_ensemble_genes_associated_with_uniprot_id(uniprot_id) )
-        print(files)
+    all_chipseq_exps = list(find_chipseq_experiments())
+    for i, exp_id in enumerate(all_chipseq_exps):
+        print( i, len(all_chipseq_exps), exp_id )
+        try:
+            insert_chipseq_experiment_into_db( exp_id )
+        except:
+            print( "ERROR with %s" % exp_id )
+            raise
+    #for target, files in find_peaks_and_group_by_target(
+    #        only_merged=False, prefer_uniformly_processed=False):
+    #    insert_chipseq_data_into_db(target, files)
     #res = download_sort_and_index_tfs()
     #with open("tfs.txt", "w") as ofp:
     #    for entry in res:
